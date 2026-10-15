@@ -47,6 +47,7 @@ class Policy:
     effective: dict[str, str] = field(default_factory=dict)
     explicit: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    from_filesystem: set[str] = field(default_factory=set)
 
 
 @dataclass

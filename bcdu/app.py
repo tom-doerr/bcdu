@@ -73,7 +73,8 @@ class PolicyEditor(ModalScreen[Edit | None]):
     def update_help(self) -> None:
         option = str(self.query_one("#option", Select).value)
         effective = self.policy.effective.get(option, "unknown")
-        source = "explicit" if option in self.policy.explicit else "inherited / default"
+        source = ("explicit" if option in self.policy.explicit else "filesystem default"
+                  if option in self.policy.from_filesystem else "inherited / default")
         self.query_one("#option-help", Static).update(Text(
             f"{OPTIONS.get(option, '')}\nCurrent: {effective} ({source}). Use - to inherit."))
         self.invalidate()
@@ -150,6 +151,7 @@ class BcduApp(App):
     BINDINGS = [Binding("q", "quit", "Quit"), Binding("f", "filesystem", "Filesystem"),
                 Binding("e", "edit", "Edit policy"), Binding("x", "extents", "Extents"),
                 Binding("i", "details", "Details"), Binding("slash", "search", "Filter"),
+                Binding("u", "raw_usage", "Raw report", show=False),
                 Binding("s", "sort", "Sort"), Binding("r", "refresh", "Refresh"),
                 Binding("question_mark", "help", "Help"),
                 Binding("escape", "clear_filter", show=False),
@@ -336,7 +338,8 @@ class BcduApp(App):
             for option in OPTIONS:
                 label = option.replace("_", " ")
                 value = policy.effective.get(option, "—")
-                source = "explicit" if option in policy.explicit else "inherited"
+                source = ("explicit" if option in policy.explicit else "filesystem"
+                          if option in policy.from_filesystem else "inherited")
                 text.append(f"\n{label}\n", style="#90a6ba")
                 text.append(f"{value}  ", style="bold #e7edf5")
                 text.append(source, style="#f0ba6b" if source == "explicit" else "#697f94")
@@ -460,6 +463,10 @@ class BcduApp(App):
                       "Device durability weights can differ from the number of copies.\n", style="#90a6ba")
         self.push_screen(Report("FILESYSTEM OVERVIEW", report))
 
+    def action_raw_usage(self) -> None:
+        self.push_screen(Report("RAW BCACHEFS USAGE REPORT", self.usage.raw or self.usage.error or
+                                "No report available yet.", raw=True))
+
     def action_edit(self) -> None:
         if self.editing:
             self.notify("A policy command is already running.")
@@ -518,6 +525,7 @@ class BcduApp(App):
             "s            Sort: logical bytes → allocated blocks → name\n"
             "i            Expand selected entry details (also useful in narrow terminals)\n"
             "f            Filesystem: physical space, compression, EC, degradation, devices\n"
+            "u            Raw bcachefs usage report\n"
             "x            Query actual extents of the selected file, if supported\n"
             "e            Edit policy, preview scope, then explicitly apply\n"
             "r            Rescan directory and refresh filesystem counters\n"

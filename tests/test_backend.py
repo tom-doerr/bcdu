@@ -1,3 +1,4 @@
+import errno
 import sys
 from pathlib import Path
 
@@ -58,3 +59,39 @@ def test_apply_rechecks_path_and_uses_argument_array(tmp_path, monkeypatch):
     backend.read_only = True
     with pytest.raises(BackendError, match="Read-only"):
         backend.prepare(path, "compression", "lz4")
+
+
+def test_successful_exit_does_not_prove_policy_changed(tmp_path, monkeypatch):
+    path = tmp_path / "file"
+    path.touch()
+    backend = Backend(tmp_path, binary="bcachefs")
+    monkeypatch.setattr(backend, "require_bcachefs", lambda _: None)
+    monkeypatch.setattr(backend, "supported_options", lambda: {"compression"})
+    monkeypatch.setattr(backend, "policy", lambda _: Policy({"compression": "lz4"},
+                                                           {"compression": "lz4"}))
+    monkeypatch.setattr(backend, "command", lambda *a, **kw: ("", ""))
+    edit = backend.prepare(path, "compression", "zstd:3")
+    with pytest.raises(BackendError, match="could not be verified"):
+        backend.apply(edit)
+
+
+def test_unset_effective_attributes_use_filesystem_defaults(tmp_path, monkeypatch):
+    from bcdu.backend import Mount
+
+    path = tmp_path / "file"
+    path.touch()
+    backend = Backend(tmp_path)
+    backend.mount = Mount(tmp_path, "bcachefs")
+
+    def attribute(path, key, **kwargs):
+        if key == "bcachefs_effective.compression":
+            return b"zstd:3"
+        raise OSError(errno.ENODATA, "unset")
+
+    monkeypatch.setattr("bcdu.backend.os.getxattr", attribute)
+    monkeypatch.setattr(backend, "filesystem_defaults", lambda: {"compression": "lz4",
+                                                               "data_replicas": "3"})
+    policy = backend.policy(path)
+    assert policy.effective == {"compression": "zstd:3", "data_replicas": "3"}
+    assert policy.from_filesystem == {"data_replicas"}
+    assert policy.explicit == {}

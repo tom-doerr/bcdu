@@ -2,6 +2,7 @@
 
 import ctypes
 import errno
+import fcntl
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import stat
 import struct
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,6 +174,7 @@ class Backend:
 
     def policy(self, path: Path) -> Policy:
         result = Policy()
+        defaults_needed = set()
         for prefix, values in (("bcachefs_effective.", result.effective),
                                ("bcachefs.", result.explicit)):
             for option in OPTIONS:
@@ -179,11 +182,41 @@ class Backend:
                     values[option] = os.getxattr(path, prefix + option,
                                                follow_symlinks=False).decode(errors="replace")
                 except OSError as exc:
+                    if prefix == "bcachefs_effective." and exc.errno == errno.ENODATA:
+                        defaults_needed.add(option)
                     if exc.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EINVAL):
                         message = exc.strerror or str(exc)
                         if message not in result.errors:
                             result.errors.append(message)
+        if defaults_needed and self.mount.fs_type == "bcachefs" and not path.is_symlink():
+            defaults = self.filesystem_defaults()
+            for option in defaults_needed:
+                if option in defaults:
+                    result.effective[option] = defaults[option]
+                    result.from_filesystem.add(option)
         return result
+
+    def filesystem_defaults(self) -> dict[str, str]:
+        # Read-only QUERY_UUID ioctl, then the matching filesystem's sysfs options.
+        # Never guess by selecting the first mounted bcachefs instance.
+        try:
+            fd = os.open(self.mount.path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                identity = fcntl.ioctl(fd, 0x8010BC01, bytes(16))
+            finally:
+                os.close(fd)
+            root = Path("/sys/fs/bcachefs") / str(uuid.UUID(bytes=identity)) / "options"
+        except (OSError, ValueError):
+            return {}
+        values = {}
+        for option in OPTIONS:
+            try:
+                raw = (root / option).read_text().strip()
+                selected = re.search(r"\[([^]]+)]", raw)
+                values[option] = selected[1] if selected else raw
+            except OSError:
+                continue
+        return values
 
     def supported_options(self) -> set[str]:
         if self._supported is None:
@@ -201,8 +234,11 @@ class Backend:
         st = path.lstat()
         if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
             raise BackendError("Select a regular file or directory; symlinks cannot be edited.")
+        policy = self.policy(path)
+        if policy.errors:
+            raise BackendError("Cannot read the current policy: " + "; ".join(policy.errors))
         return Edit(path, option, value, (st.st_dev, st.st_ino),
-                    self.policy(path).explicit.get(option), stat.S_ISDIR(st.st_mode))
+                    policy.explicit.get(option), stat.S_ISDIR(st.st_mode))
 
     def apply(self, edit: Edit) -> str:
         # Revalidate after the confirmation screen; do not write to a replaced path.
@@ -215,7 +251,10 @@ class Backend:
         if edit.value == "-":
             verified = edit.option not in after.explicit
         else:
-            verified = edit.option in after.explicit
+            observed = after.explicit.get(edit.option)
+            verified = observed == edit.value
+            if "compression" in edit.option and ":" not in edit.value and observed:
+                verified = observed.split(":", 1)[0] == edit.value
         if not verified or after.errors:
             raise BackendError("Command completed, but the root attribute could not be verified. "
                                "The change may have partially applied; refresh before retrying.")

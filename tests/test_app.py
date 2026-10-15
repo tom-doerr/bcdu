@@ -56,3 +56,16 @@ async def test_cancel_and_read_only_do_not_apply():
         await pilot.press("e")
         assert not isinstance(app.screen, PolicyEditor)
         assert not app.backend.overrides
+
+
+async def test_cancel_after_preview_keeps_policy_unchanged():
+    app = BcduApp(Path("/"), demo=True)
+    async with app.run_test(size=(120, 45)) as pilot:
+        await pilot.pause()
+        await pilot.press("e")
+        app.screen.query_one("#value", Input).value = "zstd:3"
+        await pilot.click("#preview-button")
+        await pilot.pause()
+        assert app.screen.edit is not None
+        await pilot.press("escape")
+        assert not app.backend.overrides
